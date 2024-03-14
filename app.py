@@ -36,139 +36,101 @@ app = Flask(__name__)
 # Flask Routes
 #################################################
 
-# Define the homepage route
-@app.route("/")
+@app.route('/')
 def home():
+    # List all the available routes.
     return (
-        f"Welcome to the Climate App!<br/>"
         f"Available Routes:<br/>"
-        f"/api/v1.0/precipitation<br/>"
-        f"/api/v1.0/stations<br/>"
-        f"/api/v1.0/tobs<br/>"
-        f"/api/v1.0/&lt;start&gt;<br/>"
-        f"/api/v1.0/&lt;start&gt;/&lt;end&gt;"
+        f"/api/v1.0/precipitation - dictionary of precipitation by date of last year<br/>"
+        f"/api/v1.0/stations - list of stations<br/>"
+        f"/api/v1.0/tobs - list of temperature observations for most active station<br/>"
+        f"/api/v1.0/start - min,max, and avg temperature from start date (must be in YYYY-MM-DD format)<br/>"
+        f"/api/v1.0/start/end - min,max, and avg temperature from start date to end date (must be in YYYY-MM-DD format)"
     )
 
-# Define the /api/v1.0/precipitation route
-@app.route("/api/v1.0/precipitation")
-def precipitation():
-    session = Session(engine)
+@app.route('/api/v1.0/precipitation')
+def prcp():
+    # Calculate the date one year from the last date in data set.
+    current_date = session.query(Measurement.date).order_by(Measurement.date.desc()).first()[0]
+    prev_year = dt.datetime.strftime(dt.datetime.strptime(current_date,'%Y-%m-%d') - dt.timedelta(days = 365),'%Y-%m-%d')
 
-    # Calculate the date one year from the last date in the dataset
-    most_recent_date = session.query(func.max(Measurement.date)).scalar()
-    one_year_ago = dt.datetime.strptime(most_recent_date, '%Y-%m-%d') - dt.timedelta(days=365)
-
-    # Query precipitation data for the last 12 months
-    results = session.query(Measurement.date, Measurement.prcp).filter(Measurement.date >= one_year_ago).all()
-
+    # Perform a query to retrieve the data and precipitation scores
+    date_prcp = session.query(Measurement.date,Measurement.prcp).\
+        filter(Measurement.date >= prev_year).\
+        order_by(Measurement.date.desc()).all()
+    
+    # Dictionary of tempeartures, key: date, value: list of recorded temperatures
+    prec_dict = {}
+    for i in date_prcp:
+        if i[0] not in prec_dict:
+            prec_dict[i[0]] = []
+        prec_dict[i[0]].append(i[1])
+    print('Successful precipitation query')
     session.close()
+    return prec_dict
 
-    # Convert the query results to a dictionary
-    precipitation_data = {date: prcp for date, prcp in results}
-    return jsonify(precipitation_data)
-
-# Define the /api/v1.0/stations route
-@app.route("/api/v1.0/stations")
+@app.route('/api/v1.0/stations')
 def stations():
-    # Create a new session for this route
-    session = Session(engine)
-
-    # Query to retrieve the list of stations
-    results = session.query(Station.station).all()
-
-    # Convert the results to a list
-    station_list = [station for (station,) in results]
-
-    # Close the session
+    # Query station id and name
+    station_list = session.query(Station.station,Station.name).all()
+    print('Successful stations query')
     session.close()
+    return jsonify([(i[0],i[1]) for i in station_list])
 
-    return jsonify(station_list)
-
-# Define the /api/v1.0/tobs route
-@app.route("/api/v1.0/tobs")
+@app.route('/api/v1.0/tobs')
 def tobs():
-    session = Session(engine)
-    
-    # Find the most active station
-    most_active_station = session.query(Measurement.station).group_by(Measurement.station).\
-        order_by(func.count().desc()).first()[0]
-    
-    # Calculate the date one year from the last date in the dataset
-    most_recent_date = session.query(func.max(Measurement.date)).scalar()
-    one_year_ago = dt.datetime.strptime(most_recent_date, '%Y-%m-%d') - dt.timedelta(days=365)
-    
-    # Query temperature observations for the most active station for the last 12 months
-    results = session.query(Measurement.date, Measurement.tobs).\
-        filter(Measurement.station == most_active_station, Measurement.date >= one_year_ago).all()
-    
+    # Calculate the date one year from the last date in data set.
+    current_date = session.query(Measurement.date).order_by(Measurement.date.desc()).first()[0]
+    prev_year = dt.datetime.strftime(dt.datetime.strptime(current_date,'%Y-%m-%d') - dt.timedelta(days = 365),'%Y-%m-%d')
+
+    # Order stations by number of occurrences
+    active_stations = session.query(Measurement.station,func.count(Measurement.station)).group_by(Measurement.station).order_by(func.count(Measurement.station).desc()).all()
+
+    # Find temperature observations of most active station
+    station_name = active_stations[0][0]
+    temps = session.query(Measurement.tobs).filter(Measurement.station == station_name).filter(Measurement.date >= prev_year).all()
+    print('Successful tobs query')
     session.close()
+    return jsonify([i[0] for i in temps])
 
-    # Convert the query results to a list of dictionaries
-    tobs_data = [{'Date': date, 'Temperature': tobs} for date, tobs in results]
-    
-    return jsonify(tobs_data)
-
-# Define the /api/v1.0/<start> route
-@app.route("/api/v1.0/<string:start>")
-def calc_temps_start(start):
-    session = Session(engine)
-
+@app.route('/api/v1.0/<start>')
+def temps_start(start):
+    # Check if date is in right format YYYY-MM-DD
     try:
-        start_date = dt.datetime.strptime(start, '%Y-%m-%d')
+        dt.date.fromisoformat(start)
     except ValueError:
-        session.close()
-        return jsonify({"error": "Invalid date format. Please use YYYY-MM-DD."})
-
-    # Query to calculate TMIN, TAVG, and TMAX for dates greater than or equal to the start date
-    results = session.query(func.min(Measurement.tobs), func.avg(Measurement.tobs), func.max(Measurement.tobs)).\
-        filter(Measurement.date >= start_date).all()
-
-    # Close the session
+        return jsonify({"error": f"Date must be in YYYY-MM-DD format."})
+    
+    # Query based on date used
+    temp_metrics = session.query(func.min(Measurement.tobs),func.max(Measurement.tobs),func.avg(Measurement.tobs))\
+        .filter(Measurement.date >= start)\
+        .all()
+    print('Successful start date query')
     session.close()
+    return jsonify([temp_metrics[0][0],temp_metrics[0][1],temp_metrics[0][2]])
 
-    if results:
-        # Convert the query results to a dictionary
-        temp_data = {
-            'TMIN': results[0][0],
-            'TAVG': results[0][1],
-            'TMAX': results[0][2]
-        }
-        return jsonify(temp_data)
-    else:
-        # Handle case where no data is found for the specified start date
-        return jsonify({"error": "No data found for the specified start date."})
-
-# Define the /api/v1.0/<start>/<end> route
-@app.route("/api/v1.0/<string:start>/<string:end>")
-def calc_temps_start_end(start, end):
-    session = Session(engine)
-
+@app.route('/api/v1.0/<start>/<end>')
+def temps_start_end(start,end):
+    # Check if date is in right format YYYY-MM-DD
     try:
-        start_date = dt.datetime.strptime(start, '%Y-%m-%d')
-        end_date = dt.datetime.strptime(end, '%Y-%m-%d')
+        dt.date.fromisoformat(start)
+        dt.date.fromisoformat(end)
+        assert start < end
     except ValueError:
-        session.close()
-        return jsonify({"error": "Invalid date format. Please use YYYY-MM-DD."})
-
-    # Query to calculate TMIN, TAVG, and TMAX for dates between start and end (inclusive)
-    results = session.query(func.min(Measurement.tobs), func.avg(Measurement.tobs), func.max(Measurement.tobs)).\
-        filter(Measurement.date >= start_date, Measurement.date <= end_date).all()
-
-    # Close the session
+        return jsonify({"error": f"Date must be in YYYY-MM-DD format."})
+    except AssertionError:
+        return jsonify({"error": f"End date must be later than start date."})
+    
+    # Query based on date used
+    temp_metrics = session.query(func.min(Measurement.tobs),func.max(Measurement.tobs),func.avg(Measurement.tobs))\
+        .filter(Measurement.date >= start).filter(Measurement.date <= end)\
+        .all()
+    print('Successful start-end date query')
     session.close()
 
-    if results:
-        # Convert the query results to a dictionary
-        temp_data = {
-            'TMIN': results[0][0],
-            'TAVG': results[0][1],
-            'TMAX': results[0][2]
-        }
-        return jsonify(temp_data)
-    else:
-        # Handle case where no data is found for the specified date range
-        return jsonify({"error": "No data found for the specified date range."})
+    
+    return jsonify([temp_metrics[0][0],temp_metrics[0][1],temp_metrics[0][2]])
 
-# Run the app
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     app.run(debug=True)
